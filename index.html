@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YT-сканер</title>
+<style>
+  :root { --bg:#fafafa; --fg:#1b1b1f; --mut:#666; --card:#fff; --line:#e3e3e8; --acc:#2d5bff; --good:#0a7d33; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#121214; --fg:#ececf1; --mut:#9a9aa5; --card:#1b1b1f; --line:#2c2c33; --acc:#7b97ff; --good:#4cd07d; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui, sans-serif; }
+  main { max-width:1100px; margin:0 auto; padding:16px; }
+  h1 { font-size:20px; margin:8px 0 4px; }
+  p.hint { color:var(--mut); margin:0 0 12px; font-size:13px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:12px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
+  label { display:block; font-size:12px; color:var(--mut); margin-bottom:3px; }
+  input, select { width:100%; padding:8px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); font:inherit; }
+  button { padding:9px 14px; border:0; border-radius:8px; background:var(--acc); color:#fff; font:inherit; cursor:pointer; }
+  button.sec { background:transparent; color:var(--acc); border:1px solid var(--acc); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; align-items:center; }
+  #status { color:var(--mut); font-size:13px; }
+  .wrap { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; min-width:760px; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); font-size:13px; vertical-align:top; }
+  th { cursor:pointer; color:var(--mut); white-space:nowrap; }
+  td.n { text-align:right; font-variant-numeric:tabular-nums; }
+  a { color:var(--acc); text-decoration:none; }
+  .out { color:var(--good); font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+  <h1>YT-сканер: что взрывает на YouTube</h1>
+  <p class="hint">Ищет свежие ролики с высокими просмотрами у маленьких каналов. Ключ API хранится только в этом браузере (localStorage) и никуда, кроме Google, не отправляется.</p>
+
+  <div class="card">
+    <label for="key">YouTube Data API ключ (вставь один раз на устройстве)</label>
+    <input id="key" type="password" placeholder="AIza..." autocomplete="off">
+  </div>
+
+  <div class="card">
+    <div class="grid">
+      <div><label for="q">Запрос (англ.)</label><input id="q" value="what did ancient humans do all day"></div>
+      <div><label for="days">Опубликовано за, дней</label><input id="days" type="number" value="30" min="1" max="365"></div>
+      <div><label for="maxsubs">Подписчиков не больше</label><input id="maxsubs" type="number" value="50000"></div>
+      <div><label for="minviews">Просмотров не меньше</label><input id="minviews" type="number" value="50000"></div>
+      <div><label for="minout">Outlier не меньше (×)</label><input id="minout" type="number" value="3" step="0.5"></div>
+      <div><label for="dur">Длина</label>
+        <select id="dur"><option value="medium">Средняя (4–20 мин)</option><option value="long">Длинная (&gt;20 мин)</option><option value="any">Любая</option></select></div>
+      <div><label for="lang">Язык / регион</label>
+        <select id="lang"><option value="en|US">English / US</option><option value="en|GB">English / GB</option><option value="es|ES">Español / ES</option><option value="de|DE">Deutsch / DE</option><option value="pt|BR">Português / BR</option></select></div>
+      <div><label for="pages">Страниц поиска (×50)</label><select id="pages"><option>1</option><option>2</option><option>3</option></select></div>
+    </div>
+    <div class="row">
+      <button id="go">Искать</button>
+      <button id="copy" class="sec" type="button">Скопировать таблицу</button>
+      <span id="status"></span>
+    </div>
+  </div>
+
+  <div class="card wrap"><table id="t"><thead></thead><tbody></tbody></table></div>
+  <p class="hint">Outlier = просмотры ролика ÷ средние просмотры на ролик у канала (канал.просмотры ÷ канал.роликов), грубая оценка. «Просм/час» — с момента публикации. Один поиск тратит 100 ед. из лимита 10 000 в день ( search.list — отдельный лимит ~100 запросов/день).</p>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const API = 'https://www.googleapis.com/youtube/v3/';
+try { $('key').value = localStorage.getItem('ytkey') || ''; } catch (e) {}
+let rows = [], sortKey = 'out', sortDir = -1;
+const cols = [
+  ['title','Ролик',0], ['channel','Канал',0], ['subs','Подп.',1], ['views','Просм.',1],
+  ['out','Outlier ×',1], ['vph','Просм/час',1], ['age','Дней',1], ['len','Мин',1]
+];
+const fmt = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : String(n);
+const isoMin = d => { const m = /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/.exec(d)||[]; return (+m[1]||0)*60 + (+m[2]||0) + (+m[3]||0)/60; };
+
+async function call(path, params, key) {
+  const u = new URL(API + path); Object.entries({ ...params, key }).forEach(([k, v]) => u.searchParams.set(k, v));
+  const r = await fetch(u); const j = await r.json();
+  if (!r.ok) throw new Error((j.error && j.error.message) || r.status);
+  return j;
+}
+
+async function run() {
+  const key = $('key').value.trim();
+  if (!key) { $('status').textContent = 'Вставь ключ API.'; return; }
+  try { localStorage.setItem('ytkey', key); } catch (e) {}
+  $('go').disabled = true; rows = [];
+  try {
+    const [lang, region] = $('lang').value.split('|');
+    const after = new Date(Date.now() - $('days').value * 864e5).toISOString();
+    let ids = [], token = '';
+    for (let p = 0; p < +$('pages').value; p++) {
+      $('status').textContent = 'Поиск, страница ' + (p+1) + '…';
+      const s = await call('search', { part:'snippet', type:'video', q:$('q').value, maxResults:50, order:'viewCount',
+        publishedAfter:after, relevanceLanguage:lang, regionCode:region, videoDuration:$('dur').value === 'any' ? 'any' : $('dur').value, pageToken:token }, key);
+      ids.push(...s.items.map(i => i.id.videoId)); token = s.nextPageToken; if (!token) break;
+    }
+    ids = [...new Set(ids)];
+    const vids = [];
+    for (let i = 0; i < ids.length; i += 50) {
+      $('status').textContent = 'Статистика роликов…';
+      vids.push(...(await call('videos', { part:'snippet,statistics,contentDetails', id: ids.slice(i, i+50).join(',') }, key)).items);
+    }
+    const chIds = [...new Set(vids.map(v => v.snippet.channelId))], ch = {};
+    for (let i = 0; i < chIds.length; i += 50) {
+      $('status').textContent = 'Статистика каналов…';
+      (await call('channels', { part:'statistics', id: chIds.slice(i, i+50).join(',') }, key)).items.forEach(c => ch[c.id] = c.statistics);
+    }
+    const maxsubs = +$('maxsubs').value, minviews = +$('minviews').value, minout = +$('minout').value;
+    for (const v of vids) {
+      const c = ch[v.snippet.channelId]; if (!c) continue;
+      const subs = c.hiddenSubscriberCount ? 0 : +c.subscriberCount, views = +v.statistics.viewCount;
+      const avg = +c.viewCount / Math.max(1, +c.videoCount), out = avg ? views / avg : 0;
+      const hours = Math.max(1, (Date.now() - new Date(v.snippet.publishedAt)) / 36e5);
+      if (subs > maxsubs || views < minviews || out < minout) continue;
+      rows.push({ id:v.id, title:v.snippet.title, channel:v.snippet.channelTitle, cid:v.snippet.channelId, subs, views,
+        out:+out.toFixed(1), vph:Math.round(views / hours), age:Math.round(hours / 24), len:Math.round(isoMin(v.contentDetails.duration)) });
+    }
+    $('status').textContent = 'Найдено: ' + rows.length + ' из ' + vids.length + ' проверенных.';
+    render();
+  } catch (e) { $('status').textContent = 'Ошибка: ' + e.message; }
+  $('go').disabled = false;
+}
+
+function render() {
+  rows.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : -1) * sortDir);
+  $('t').tHead.innerHTML = '<tr>' + cols.map(c => `<th data-k="${c[0]}">${c[1]}${sortKey === c[0] ? (sortDir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('') + '</tr>';
+  $('t').tBodies[0].innerHTML = rows.map(r => `<tr><td><a target="_blank" rel="noopener" href="https://youtu.be/${r.id}">${esc(r.title)}</a></td>
+    <td><a target="_blank" rel="noopener" href="https://www.youtube.com/channel/${r.cid}">${esc(r.channel)}</a></td>
+    <td class="n">${fmt(r.subs)}</td><td class="n">${fmt(r.views)}</td><td class="n out">${r.out}</td><td class="n">${fmt(r.vph)}</td><td class="n">${r.age}</td><td class="n">${r.len}</td></tr>`).join('');
+  document.querySelectorAll('th').forEach(th => th.onclick = () => { const k = th.dataset.k; sortDir = sortKey === k ? -sortDir : -1; sortKey = k; render(); });
+}
+const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+$('go').onclick = run;
+$('copy').onclick = async () => {
+  const head = '| Ролик | Канал | Подп. | Просм. | Outlier | Просм/час | Дней | Мин | Ссылка |\n|---|---|---|---|---|---|---|---|---|\n';
+  const body = rows.map(r => `| ${r.title.replace(/\|/g,'/')} | ${r.channel} | ${r.subs} | ${r.views} | ${r.out} | ${r.vph} | ${r.age} | ${r.len} | https://youtu.be/${r.id} |`).join('\n');
+  try { await navigator.clipboard.writeText('Запрос: ' + $('q').value + '\n\n' + head + body); $('status').textContent = 'Таблица скопирована — вставь в чат с Claude.'; } catch (e) { $('status').textContent = 'Не удалось скопировать.'; }
+};
+render();
+</script>
+</body>
+</html>
